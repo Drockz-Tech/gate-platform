@@ -1,49 +1,23 @@
-// app/api/questions/route.ts
-//
-// GET /api/questions
-//
-// Main endpoint to list questions with powerful filters.
-// Supports:
-// - examCode
-// - subjectId
-// - topicIds (multi)
-// - yearFrom / yearTo
-// - difficulty (multi)
-// - type (multi)
-// - marks (multi)
-// - formulaBased (true/false)
-// - tagIds (multi)
-// - tagSlugs (multi)
-// - hasSolution (true/false)
-// - onlyBookmarked (user-specific)
-// - onlyUnattempted (user-specific)
-// - pagination: take, skip
-// - sorting: sortBy=year_desc|year_asc
-//
-// This is written to be easy to extend later (more filters, sorts)
-// without rewriting the whole handler.
-
 import { NextRequest, NextResponse } from 'next/server';
 import { Difficulty, QuestionType, Prisma } from '@prisma/client';
 import { prisma } from '@/app/lib/prisma';
 import { getCurrentUserId } from '@/app/lib/auth';
 
-/* -------------------- helpers: parsing query params -------------------- */
-
-function parseIntOrNull(value: string | null): number | null {
+function parseNumber(value: string | null): number | null {
   if (!value) return null;
   const n = Number(value);
-  return Number.isNaN(n) ? null : n;
+  return Number.isFinite(n) ? n : null;
 }
 
-function parseBooleanOrNull(value: string | null): boolean | null {
-  if (!value) return null;
-  if (value.toLowerCase() === 'true') return true;
-  if (value.toLowerCase() === 'false') return false;
-  return null;
+function parseNumberArray(value: string | null): number[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((v) => Number(v.trim()))
+    .filter((n) => Number.isFinite(n));
 }
 
-function parseList(value: string | null): string[] {
+function parseStringArray(value: string | null): string[] {
   if (!value) return [];
   return value
     .split(',')
@@ -51,94 +25,107 @@ function parseList(value: string | null): string[] {
     .filter(Boolean);
 }
 
-function parseEnumList<T extends string>(
+function parseBool(value: string | null): boolean | null {
+  if (value === null) return null;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
+function parseEnumArray<T extends string>(
   value: string | null,
   allowed: readonly T[],
 ): T[] {
-  const raw = parseList(value);
-  const set = new Set(allowed);
-  return raw.filter((v): v is T => set.has(v as T));
+  if (!value) return [];
+  const parts = value.split(',');
+  const out: T[] = [];
+  for (const p of parts) {
+    const v = p.trim().toUpperCase() as T;
+    if (allowed.includes(v)) out.push(v);
+  }
+  return out;
 }
 
-/* -------------------- GET handler ------------------------------------- */
-
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const params = url.searchParams;
-
-  // Core filters
-  const examCode = params.get('examCode') ?? 'GATE_CSE';
-  const subjectId = params.get('subjectId');
-  const topicIds = parseList(params.get('topicIds')); // topicIds=id1,id2
-
-  const yearFrom = parseIntOrNull(params.get('yearFrom'));
-  const yearTo = parseIntOrNull(params.get('yearTo'));
-
-  const difficulties = parseEnumList<Difficulty>(params.get('difficulty'), [
-    'EASY',
-    'MEDIUM',
-    'HARD',
-  ]);
-
-  const types = parseEnumList<QuestionType>(params.get('type'), [
-    'MCQ',
-    'MSQ',
-    'NAT',
-  ]);
-
-  const marksList = parseList(params.get('marks'))
-    .map((m) => Number(m))
-    .filter((m) => !Number.isNaN(m));
-
-  const formulaBased = parseBooleanOrNull(params.get('formulaBased')); // true / false
-  const hasSolution = parseBooleanOrNull(params.get('hasSolution')); // true / false
-
-  // Tag filters
-  const tagIds = parseList(params.get('tagIds')); // tagIds=id1,id2
-  const tagSlugs = parseList(params.get('tagSlugs')); // tagSlugs=high-weightage,tricky
-
-  // User-specific filters
-  const onlyBookmarked = parseBooleanOrNull(params.get('onlyBookmarked')) ?? false;
-  const onlyUnattempted = parseBooleanOrNull(params.get('onlyUnattempted')) ?? false;
-
-  // Pagination
-  const takeRaw = parseIntOrNull(params.get('take'));
-  const skipRaw = parseIntOrNull(params.get('skip'));
-  const take = takeRaw && takeRaw > 0 && takeRaw <= 100 ? takeRaw : 20;
-  const skip = skipRaw && skipRaw >= 0 ? skipRaw : 0;
-
-  // Sorting
-  const sortBy = params.get('sortBy') ?? 'year_desc'; // "year_desc" | "year_asc"
-
-  try {
-    const userId = await getCurrentUserId();
-
-    // If user-specific filters are requested, ensure user is logged in
-    if ((onlyBookmarked || onlyUnattempted) && !userId) {
+  // try {
+    const url = new URL(req.url);
+    const examCode = url.searchParams.get('examCode');
+    if (!examCode) {
       return NextResponse.json(
-        { error: 'Unauthorized for user-specific filters' },
-        { status: 401 },
+        { error: '"examCode" query param is required' },
+        { status: 400 },
       );
     }
 
-    // Find exam id from examCode (keeps query explicit & indexed)
+    // Optional subject/topic filters
+    const subjectId = url.searchParams.get('subjectId');
+    const topicIdsParam = url.searchParams.get('topicIds');
+    const topicIds = parseStringArray(topicIdsParam);
+
+    // Year range
+    const yearFrom = parseNumber(url.searchParams.get('yearFrom'));
+    const yearTo = parseNumber(url.searchParams.get('yearTo'));
+
+    // Difficulty and type
+    const difficulties = parseEnumArray<Difficulty>(
+      url.searchParams.get('difficulty'),
+      ['EASY', 'MEDIUM', 'HARD'],
+    );
+    const types = parseEnumArray<QuestionType>(
+      url.searchParams.get('type'),
+      ['MCQ', 'MSQ', 'NAT'],
+    );
+
+    // Marks
+    const marks = parseNumberArray(url.searchParams.get('marks'));
+
+    // Booleans
+    const formulaBased = parseBool(url.searchParams.get('formulaBased'));
+    const hasSolution = parseBool(url.searchParams.get('hasSolution'));
+
+    const tagIds = parseStringArray(url.searchParams.get('tagIds'));
+    const tagSlugs = parseStringArray(url.searchParams.get('tagSlugs'));
+
+    const onlyBookmarked =
+      url.searchParams.get('onlyBookmarked') === 'true';
+    const onlyUnattempted =
+      url.searchParams.get('onlyUnattempted') === 'true';
+
+    const sortBy = url.searchParams.get('sortBy') ?? 'year_desc';
+
+    const take = parseNumber(url.searchParams.get('take')) ?? 20;
+    const skip = parseNumber(url.searchParams.get('skip')) ?? 0;
+
+    const userId = await getCurrentUserId();
+
+    // Look up exam id
     const exam = await prisma.exam.findUnique({
       where: { code: examCode },
       select: { id: true },
     });
 
     if (!exam) {
-      return NextResponse.json({ error: 'Exam not found' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Exam not found for given examCode' },
+        { status: 404 },
+      );
     }
 
-    /* -------------------- build Prisma where clause -------------------- */
-
+    // Build Prisma where
     const where: Prisma.QuestionWhereInput = {
       examId: exam.id,
     };
 
     if (subjectId) {
       where.subjectId = subjectId;
+    }
+
+    if (topicIds.length > 0) {
+      where.topics = {
+        some: {
+          topicId: { in: topicIds },
+        },
+      };
     }
 
     if (yearFrom !== null || yearTo !== null) {
@@ -155,8 +142,8 @@ export async function GET(req: NextRequest) {
       where.type = { in: types };
     }
 
-    if (marksList.length > 0) {
-      where.marks = { in: marksList };
+    if (marks.length > 0) {
+      where.marks = { in: marks };
     }
 
     if (formulaBased !== null) {
@@ -167,35 +154,31 @@ export async function GET(req: NextRequest) {
       where.hasSolution = hasSolution;
     }
 
-    if (topicIds.length > 0) {
-      where.topics = {
-        some: {
-          topicId: { in: topicIds },
-        },
-      };
-    }
-
-    // Tag filter: by IDs
-    if (tagIds.length > 0) {
+    if (tagIds.length > 0 || tagSlugs.length > 0) {
       where.tags = {
         some: {
-          tagId: { in: tagIds },
+          OR: [
+            tagIds.length
+              ? {
+                  tagId: {
+                    in: tagIds,
+                  },
+                }
+              : undefined,
+            tagSlugs.length
+              ? {
+                  tag: {
+                    slug: {
+                      in: tagSlugs.map((s) => s.toLowerCase()),
+                    },
+                  },
+                }
+              : undefined,
+          ].filter(Boolean) as any,
         },
       };
     }
 
-    // Tag filter: by tag slugs (more user-friendly, SEO-friendly)
-    if (tagSlugs.length > 0) {
-      where.tags = {
-        some: {
-          tag: {
-            slug: { in: tagSlugs },
-          },
-        },
-      };
-    }
-
-    // User-specific filters
     if (onlyBookmarked && userId) {
       where.bookmarks = {
         some: {
@@ -212,75 +195,96 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    /* -------------------- sorting -------------------------------------- */
-
-    let orderBy: Prisma.QuestionOrderByWithRelationInput = {
-      year: 'desc',
-    };
+    // Sort
+        // Sort — Prisma 7 expects orderBy as an array
+    let orderBy: Prisma.QuestionOrderByWithRelationInput[] = [
+      { year: 'desc' },
+      { createdAt: 'desc' },
+    ];
 
     if (sortBy === 'year_asc') {
-      orderBy = { year: 'asc' };
+      orderBy = [
+        { year: 'asc' },
+        { createdAt: 'asc' },
+      ];
+    } else if (sortBy === 'year_desc') {
+      orderBy = [
+        { year: 'desc' },
+        { createdAt: 'desc' },
+      ];
     }
-    // Later, you can add more:
-    // - difficulty
-    // - createdAt
-    // - custom popularity/attempts metric (via a materialized view / denormalized column)
 
-    /* -------------------- query DB ------------------------------------- */
-
-    const [questions, total] = await Promise.all([
+    // Query DB
+    const [total, questions] = await Promise.all([
+      prisma.question.count({ where }),
       prisma.question.findMany({
         where,
-        select: {
-          id: true,
-          year: true,
-          shift: true,
-          marks: true,
-          type: true,
-          difficulty: true,
-          question: true,
-          isFormulaBased: true,
-          hasSolution: true,
-          createdAt: true,
+        orderBy, // ✅ now an array
+        skip,
+        take,
+        include: {
           subject: {
-            select: { id: true, name: true },
+            select: {
+              id: true,
+              name: true,
+            },
           },
           topics: {
-            select: {
-              topic: { select: { id: true, name: true } },
+            include: {
+              topic: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
             },
           },
           tags: {
-            select: {
-              tag: { select: { id: true, name: true, slug: true } },
+            include: {
+              tag: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
+              },
             },
           },
         },
-        orderBy,
-        skip,
-        take,
       }),
-      prisma.question.count({ where }),
     ]);
 
-    /* -------------------- response payload ----------------------------- */
+
+    const data = questions.map((q) => ({
+      id: q.id,
+      question: q.question,
+      year: q.year,
+      shift: q.shift,
+      marks: q.marks,
+      type: q.type,
+      difficulty: q.difficulty,
+      isFormulaBased: q.isFormulaBased,
+      hasSolution: q.hasSolution,
+      createdAt: q.createdAt.toISOString(),
+      subject: q.subject
+        ? {
+            id: q.subject.id,
+            name: q.subject.name,
+          }
+        : null,
+      topics: q.topics.map((qt) => ({
+        id: qt.topic.id,
+        name: qt.topic.name,
+      })),
+      tags: q.tags.map((qt) => ({
+        id: qt.tag.id,
+        name: qt.tag.name,
+        slug: qt.tag.slug,
+      })),
+    }));
 
     return NextResponse.json({
-      data: questions.map((q) => ({
-        id: q.id,
-        question: q.question,
-        year: q.year,
-        shift: q.shift,
-        marks: q.marks,
-        type: q.type,
-        difficulty: q.difficulty,
-        isFormulaBased: q.isFormulaBased,
-        hasSolution: q.hasSolution,
-        subject: q.subject,
-        topics: q.topics.map((t) => t.topic),
-        tags: q.tags.map((t) => t.tag),
-        createdAt: q.createdAt,
-      })),
+      data,
       pagination: {
         total,
         take,
@@ -294,7 +298,7 @@ export async function GET(req: NextRequest) {
         yearTo,
         difficulties,
         types,
-        marks: marksList,
+        marks,
         formulaBased,
         hasSolution,
         tagIds,
@@ -304,11 +308,12 @@ export async function GET(req: NextRequest) {
         sortBy,
       },
     });
-  } catch (err) {
-    console.error('GET /api/questions error:', err);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 },
-    );
+  // } catch (err) {
+  //   console.error('GET /api/questions error:', err);
+  //   return NextResponse.json(
+  //     { error: 'Internal server error' },
+  //     { status: 500 },
+  //   );
+  // }
+// }
   }
-}
