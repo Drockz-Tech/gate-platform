@@ -1,0 +1,325 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/client"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/**
+ * * ENUMS ***********************************************************
+ */
+
+enum QuestionType {
+  MCQ
+  MSQ
+  NAT
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+/**
+ * * CORE USER MODEL *************************************************
+ */
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempts        QuestionAttempt[]
+  bookmarks       Bookmark[]
+  feedbacks       QuestionFeedback[]
+  reports         QuestionReport[]
+  mocks           Mock[]
+  mockSubmissions MockSubmission[]
+}
+
+/**
+ * * EXAM → SUBJECT → TOPIC *****************************************
+ */
+
+model Exam {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique // e.g. "GATE_CSE", "GATE_ECE"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subjects  Subject[]
+  questions Question[]
+
+  @@index([code])
+}
+
+model Subject {
+  id        String   @id @default(cuid())
+  exam      Exam     @relation(fields: [examId], references: [id])
+  examId    String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  topics    Topic[]
+  questions Question[] @relation("SubjectQuestions")
+
+  @@unique([examId, name]) // "OS" should be unique within an exam
+  @@index([examId])
+}
+
+model Topic {
+  id        String   @id @default(cuid())
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+  subjectId String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  questionLinks QuestionTopic[]
+
+  @@unique([subjectId, name]) // topic unique within a subject
+  @@index([subjectId])
+}
+
+/**
+ * * QUESTION BANK ***************************************************
+ */
+
+model Question {
+  id          String       @id @default(cuid())
+  exam        Exam         @relation(fields: [examId], references: [id])
+  examId      String
+  subject     Subject?     @relation("SubjectQuestions", fields: [subjectId], references: [id])
+  subjectId   String?
+  year        Int
+  shift       String? // e.g. "Shift 1", "Forenoon", etc.
+  question    String // main question text (can include LaTeX)
+  marks       Int
+  type        QuestionType
+  difficulty  Difficulty
+  hasSolution Boolean      @default(false)
+
+  // NEW: for formula-based practice filter
+  isFormulaBased Boolean @default(false)
+
+  // Relations
+  options       Option[]
+  solution      Solution?
+  topics        QuestionTopic[]
+  attempts      QuestionAttempt[]
+  bookmarks     Bookmark[]
+  feedbacks     QuestionFeedback[]
+  reports       QuestionReport[]
+  tags          QuestionTag[]
+  mockQuestions MockQuestion[]
+  mockResponses MockQuestionResponse[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([examId, year])
+  @@index([examId, subjectId])
+  @@index([examId, difficulty])
+  @@index([examId, type])
+  @@index([examId, isFormulaBased])
+  @@index([subjectId, year])
+}
+
+model QuestionTopic {
+  id         String   @id @default(cuid())
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  topic      Topic    @relation(fields: [topicId], references: [id])
+  topicId    String
+
+  @@unique([questionId, topicId]) // prevent duplicate mapping
+  @@index([topicId])
+  @@index([questionId])
+}
+
+model Option {
+  id         String   @id @default(cuid())
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  label      String // "A", "B", "C", "D"
+  text       String
+  isCorrect  Boolean
+
+  @@index([questionId])
+}
+
+model Solution {
+  id          String   @id @default(cuid())
+  question    Question @relation(fields: [questionId], references: [id])
+  questionId  String   @unique
+  answerText  String // final answer (for NAT, etc.)
+  explanation String // detailed explanation (Markdown/HTML/LaTeX)
+
+  @@index([questionId])
+}
+
+/**
+ * * TAGGING SYSTEM (GLOBAL, FLEXIBLE) ******************************
+ */
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String // e.g. "High Weightage", "Tricky", "GATE 2024 Pattern"
+  slug      String   @unique // e.g. "high-weightage", "tricky", "gate-2024-pattern"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  questions QuestionTag[]
+
+  @@index([slug])
+}
+
+model QuestionTag {
+  id         String   @id @default(cuid())
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  tag        Tag      @relation(fields: [tagId], references: [id])
+  tagId      String
+
+  createdAt DateTime @default(now())
+
+  @@unique([questionId, tagId]) // same tag not added twice to one question
+  @@index([tagId])
+  @@index([questionId])
+}
+
+/**
+ * * USER INTERACTION: ATTEMPTS, BOOKMARKS, FEEDBACK, REPORTS *******
+ */
+
+model QuestionAttempt {
+  id               String   @id @default(cuid())
+  user             User     @relation(fields: [userId], references: [id])
+  userId           String
+  question         Question @relation(fields: [questionId], references: [id])
+  questionId       String
+  selectedOptionId String? // for MCQ/MSQ
+  numericAnswer    Float? // for NAT
+  isCorrect        Boolean
+  timeTakenSeconds Int // per question
+  mode             String // "practice" | "mock" | future modes
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+  @@index([questionId])
+  @@index([userId, questionId])
+  @@index([questionId, isCorrect])
+}
+
+model Bookmark {
+  id         String   @id @default(cuid())
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, questionId]) // one bookmark per question per user
+  @@index([userId])
+  @@index([questionId])
+}
+
+model QuestionFeedback {
+  id         String     @id @default(cuid())
+  user       User       @relation(fields: [userId], references: [id])
+  userId     String
+  question   Question   @relation(fields: [questionId], references: [id])
+  questionId String
+  difficulty Difficulty // user-rated difficulty
+  createdAt  DateTime   @default(now())
+
+  @@unique([userId, questionId])
+  @@index([userId])
+  @@index([questionId])
+}
+
+model QuestionReport {
+  id         String   @id @default(cuid())
+  user       User?    @relation(fields: [userId], references: [id])
+  userId     String?
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  type       String // "WRONG_ANSWER" | "WRONG_SOLUTION" | "TAG_ISSUE" | "OTHER"
+  message    String?
+  createdAt  DateTime @default(now())
+
+  @@index([questionId])
+  @@index([userId])
+}
+
+/**
+ * * MOCKS (CUSTOM EXAMS) *******************************************
+ */
+
+model Mock {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  name      String
+  timeLimit Int? // minutes, nullable = untimed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  questions   MockQuestion[]
+  submissions MockSubmission[]
+
+  @@index([userId])
+}
+
+model MockQuestion {
+  id         String   @id @default(cuid())
+  mock       Mock     @relation(fields: [mockId], references: [id])
+  mockId     String
+  question   Question @relation(fields: [questionId], references: [id])
+  questionId String
+  order      Int
+
+  @@unique([mockId, questionId])
+  @@index([mockId])
+  @@index([questionId])
+}
+
+model MockSubmission {
+  id         String   @id @default(cuid())
+  mock       Mock     @relation(fields: [mockId], references: [id])
+  mockId     String
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  totalScore Int
+  createdAt  DateTime @default(now())
+
+  responses MockQuestionResponse[]
+
+  @@index([mockId])
+  @@index([userId])
+  @@index([mockId, userId])
+}
+
+model MockQuestionResponse {
+  id               String         @id @default(cuid())
+  submission       MockSubmission @relation(fields: [submissionId], references: [id])
+  submissionId     String
+  question         Question       @relation(fields: [questionId], references: [id])
+  questionId       String
+  selectedOptionId String?
+  numericAnswer    Float?
+  isCorrect        Boolean
+  timeTakenSeconds Int
+
+  @@index([submissionId])
+  @@index([questionId])
+}
